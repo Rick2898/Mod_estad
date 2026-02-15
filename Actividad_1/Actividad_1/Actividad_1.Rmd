@@ -1,0 +1,74 @@
+---
+title: "Actividad_1"
+author: "Ricardo Vargas Murillo"
+date: "2026-02-12"
+output: html_document
+---
+
+
+## Evaluación de la oferta inmobiliaria urbana
+
+### Se realizará la comprensión en profundidad del mercado de viviendas urbanas a partir de un analisis que identififca patrones, relaciones y segmentaciones con PCA, Conglomerados y correspondencia
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,        # o FALSE si no quieres mostrar código
+  message = FALSE,    # oculta "Loading required package..."
+  warning = FALSE     # oculta "built under R version..."
+)
+
+```
+
+
+
+```{r}
+library(paqueteMODELOS)
+data("vivienda")
+
+```
+
+```{r}
+colSums(is.na(vivienda))
+```
+```{r}
+summary(vivienda$preciom)
+
+library(ggplot2)
+ggplot(vivienda, aes(x = preciom)) +
+  geom_histogram(bins = 40, fill = "steelblue") +
+  labs(title = "Distribución del precio por m²")
+
+```
+```{r}
+ggplot(vivienda, aes(x = areaconst, y = preciom)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(method = "lm", color = "red") +
+  labs(title = "Precio vs Área construida")
+
+```
+
+```{r}
+ggplot(vivienda, aes(x = zona, y = preciom)) +
+  geom_boxplot(fill = "lightblue") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Precio por zona")
+
+```
+```{r}
+table(vivienda$tipo)
+
+```
+
+```{r}
+ggplot(vivienda, aes(x = tipo, y = preciom)) +
+  geom_boxplot(fill = "salmon") +
+  labs(title = "Precio según tipo de vivienda")
+
+```
+```{r}
+library(DataExplorer)
+create_report(vivienda, output_file = "EDA_vivienda.html")
+
+
+```
+
