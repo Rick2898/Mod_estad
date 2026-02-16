@@ -1,21 +1,17 @@
 ---
-title: "Actividad_1"
+title: "Evaluación de la oferta inmobiliaria urbana (Actividad 1)"
 author: "Ricardo Vargas Murillo"
 date: "2026-02-12"
 output: html_document
 ---
+#1. Introducción
+
+Problema: una inmobiliaria necesita entender el mercado urbano para mejorar la valoración (pricing) y decisiones de compra/venta.
+Objetivo: usar análisis estadístico multivariado para (i) identificar factores dominantes (PCA), (ii) segmentar inmuebles (clustering), (iii) estudiar asociaciones entre variables categóricas (correspondencia) y (iv) visualizar resultados (gráficos y mapa).
 
 
-## Evaluación de la oferta inmobiliaria urbana
-
-### Se realizará la comprensión en profundidad del mercado de viviendas urbanas a partir de un analisis que identififca patrones, relaciones y segmentaciones con PCA, Conglomerados y correspondencia
-
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(
-  echo = TRUE,        # o FALSE si no quieres mostrar código
-  message = FALSE,    # oculta "Loading required package..."
-  warning = FALSE     # oculta "built under R version..."
-)
+```{r, setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 
 ```
 
@@ -24,51 +20,530 @@ knitr::opts_chunk$set(
 ```{r}
 library(paqueteMODELOS)
 data("vivienda")
+df <- vivienda
 
-```
-
-```{r}
-colSums(is.na(vivienda))
-```
-```{r}
-summary(vivienda$preciom)
-
+library(tidyverse)
+library(janitor)
+library(skimr)
 library(ggplot2)
-ggplot(vivienda, aes(x = preciom)) +
-  geom_histogram(bins = 40, fill = "steelblue") +
-  labs(title = "Distribución del precio por m²")
+library(forcats)
+library(dplyr)
+library(stringr)
+library(stringi)
+library(janitor)
+library(mice)
+library(factoextra)
+library(cluster)
+library(factoextra)
+library(FactoMineR)
+
 
 ```
+
+
 ```{r}
-ggplot(vivienda, aes(x = areaconst, y = preciom)) +
+df <- df %>% clean_names()
+glimpse(df)
+```
+Aca podemos identificar que las variables son las siguientes: 
+
+- Variables numéricas: estrato, preciom, areaconst, parqueaderos, banios, habitaciones, longitud, latitud (id es identificador, no variable explicativa).
+- Variables categóricas: zona, piso, tipo, barrio.
+
+```{r}
+n0 <- nrow(df)
+df <- df %>% distinct()
+n1 <- nrow(df)
+tibble(
+  filas_iniciales = n0,
+  filas_despues = n1,
+  duplicadas_removidas = n0 - n1
+)
+```
+
+```{r}
+na_tab <- df %>%
+  summarise(across(everything(), ~sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "n_na") %>%
+  arrange(desc(n_na))
+na_tab
+```
+
+- Las variables con mayor proporción de faltantes son `piso` (~31.7%) y `parqueaderos` (~19.3%).  
+- Esto obliga a un tratamiento cuidadoso: `piso` se usará como categórica “Sin dato” para correspondencia; `parqueaderos` se imputará para no perder información en segmentación.
+
+
+```{r}
+df <- df %>%
+  mutate(
+    zona = as.factor(zona),
+    tipo = as.factor(tipo),
+    barrio = as.factor(barrio),
+    piso_cat = fct_explicit_na(as.factor(piso), na_level = "Sin dato"),
+    estrato = as.numeric(estrato)
+  )
+```
+
+```{r}
+df <- df %>%
+  mutate(
+    barrio_txt = as.character(barrio),
+    barrio_txt = str_squish(barrio_txt),
+    barrio_txt = str_to_lower(barrio_txt),
+    barrio_txt = stri_trans_general(barrio_txt, "Latin-ASCII"),
+    barrio_txt = if_else(barrio_txt == "ponce", "pance", barrio_txt),
+    barrio_txt = if_else(barrio_txt == "laflora", "la flora", barrio_txt)
+  ) %>%
+  filter(!is.na(barrio_txt)) %>%
+  filter(!(barrio_txt %in% c("santa", "norte"))) %>%
+  mutate(barrio = as.factor(barrio_txt)) %>%
+  select(-barrio_txt)
+```
+
+Ya normalizamos barrio para que no tenga minusculas ni tildes ni espacios y evitar duplicados
+
+continuaremos con el histograma
+
+```{r}
+ggplot(df, aes(x = preciom)) +
+  geom_histogram(bins = 40) +
+  labs(title = "Distribución del precio por m²", x = "preciom", y = "Frecuencia")
+```
+
+
+
+El precio por m² es asimétrico (cola a la derecha): hay pocos inmuebles muy caros. Esto sugiere segmentación del mercado.
+
+```{r}
+ggplot(df, aes(x = areaconst, y = preciom)) +
   geom_point(alpha = 0.3) +
-  geom_smooth(method = "lm", color = "red") +
-  labs(title = "Precio vs Área construida")
+  geom_smooth(method = "lm") +
+  labs(title = "Precio vs Área construida", x = "Área construida", y = "Precio por m²")
+
+```
+Se observa relación positiva general: a mayor área, tiende a cambiar el precio por m² (no siempre lineal; depende de zona/estrato).
+
+```{r}
+ggplot(df, aes(x = zona, y = preciom)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 25, hjust = 1)) +
+  labs(title = "Precio por zona", x = "Zona", y = "preciom")
+```
+```{r}
+ggplot(df, aes(x = tipo, y = preciom)) +
+  geom_boxplot() +
+  labs(title = "Precio por tipo de vivienda", x = "Tipo", y = "preciom")
+```
+Existen diferencias de precio por zona y tipo, lo que apoya usar técnicas multivariadas y segmentación
+
+```{r}
+df_imp <- df %>%
+  mutate(parqueaderos = as.numeric(parqueaderos)) %>%
+  select(-piso) # piso original no lo usamos; usamos piso_cat
+
+# Configurar MICE
+ini  <- mice(df_imp, maxit = 0)
+meth <- ini$method
+pred <- ini$predictorMatrix
+
+# Método para parqueaderos
+meth["parqueaderos"] <- "pmm"
+
+# No usar id como predictor si existe
+if ("id" %in% colnames(pred)) pred[, "id"] <- 0
+
+set.seed(123)
+imp <- mice(df_imp, method = meth, predictorMatrix = pred, m = 5, seed = 123)
+df2 <- complete(imp, 1)
+```
+Como `parqueaderos` tiene ~19% de faltantes y es importante para valorar, se usa imputación múltiple (MICE) con **pmm** para conservar la distribución y evitar sesgos.
+
+```{r}
+ggplot() +
+  geom_density(data = df,  aes(x = parqueaderos), na.rm = TRUE) +
+  geom_density(data = df2, aes(x = parqueaderos), na.rm = TRUE) +
+  labs(title = "Densidad parqueaderos: antes vs despues de imputacion",
+       x = "parqueaderos", y = "densidad")
+```
+Continuaremos con el PCA
+
+```{r}
+
+
+
+# Variables numéricas que sí describen el inmueble (EXCLUIMOS id)
+vars_num <- c("estrato","preciom","areaconst","parqueaderos","banios","habitaciones","longitud","latitud")
+
+df_pca <- df2 %>% select(all_of(vars_num)) %>% drop_na()
+
+# Estandarización para evitar sesgos por escalas distintas
+Xz <- scale(df_pca)
+
+# PCA
+pca <- prcomp(Xz, center = TRUE, scale. = FALSE)
+```
+
+
+```{r}
+fviz_eig(pca, addlabels = TRUE) +
+  labs(title = "PCA: Varianza explicada por componente")
+```
+El primer componente principal (PC1) explica 45.7 de la variabilidad
+Los dos primeros componentes (PC1 + PC2) explican 64.3% acumulado
+Por lo tanto, el plano PC1–PC2 permite un resumen inicial del mercado, aunque puede requerirse PC3 para capturar más variación
+
+```{r}
+eig <- get_eigenvalue(pca)
+eig
+```
+
+
+
+```{r}
+round(pca$rotation[,1:2], 3)
+
+```
+```{r}
+fviz_pca_var(pca,
+             col.var = "contrib",
+             gradient.cols = c("#FF7F00", "#034D94"),
+             repel = TRUE) +
+  labs(title = "PCA: Contribucion de variables a PC1 y PC2")
+```
+El primer componente principal (45.7% de la varianza) está asociado principalmente con las variables precio por m², número de baños, área construida, parqueaderos y estrato. Esto sugiere que PC1 captura un eje de valorización y nivel socioeconómico del inmueble.
+
+El segundo componente principal (18.6%) está asociado principalmente con número de habitaciones y variables geográficas (latitud y longitud), representando un eje de diferenciación espacial y estructural.
+
+En conjunto, PC1 y PC2 explican el 64.3% de la variabilidad del mercado, lo que permite una representación bidimensional adecuada para análisis exploratorio.
+
+```{r}
+df <- df %>%
+  mutate(
+    piso_cat = forcats::fct_explicit_na(as.factor(piso), na_level = "Sin dato")
+  )
+
+
+
+```
+
+
+```{r}
+# 1) Tomo parqueaderos imputado desde df2
+parq_imp <- df2 %>% select(id, parqueaderos)
+
+# 2) Reemplazo parqueaderos en df usando el imputado 
+df_clust_base <- df %>%
+  select(id, zona, tipo, barrio, piso_cat, estrato, preciom, areaconst,
+         banios, habitaciones, longitud, latitud, parqueaderos) %>%
+  left_join(parq_imp, by = "id", suffix = c("_orig", "_imp")) %>%
+  mutate(parqueaderos = parqueaderos_imp) %>%
+  select(-parqueaderos_orig, -parqueaderos_imp)
+
+# Variables numéricas para clustering
+vars_num <- c("estrato","preciom","areaconst","parqueaderos",
+              "banios","habitaciones","longitud","latitud")
+
+df_clust <- df_clust_base %>% drop_na(all_of(vars_num))
+
+# Estandarizar 
+Xc <- scale(df_clust %>% select(all_of(vars_num)))
+```
+
+Se usa `parqueaderos` imputado para no perder observaciones
+Se estandarizan variables para calcular distancias sin sesgo por escala
+
+```{r}
+dist_eucl <- dist(Xc, method = "euclidean")
+hc <- hclust(dist_eucl, method = "average")
+
+plot(hc, cex = 0.4, main = "Dendrograma (average)", xlab = "", sub = "")
+
+```
+Elegir k con Silhouette (k = 2 a 8)
+
+```{r}
+sil_means <- tibble(k = 2:8, sil = NA_real_)
+
+for (i in 2:8) {
+  grp <- cutree(hc, k = i)
+  sil <- silhouette(grp, dist_eucl)
+  sil_means$sil[sil_means$k == i] <- mean(sil[,3])
+}
+
+sil_means
+
+ggplot(sil_means, aes(k, sil)) +
+  geom_line() + geom_point() +
+  labs(title = "Silhouette promedio por k", x = "k", y = "Silhouette promedio")
+
+k_final <- sil_means$k[which.max(sil_means$sil)]
+k_final
+
+```
+```{r}
+df_clust <- df_clust %>%
+  mutate(cluster = factor(cutree(hc, k = k_final)))
+
+plot(hc, cex = 0.4, main = paste("Dendrograma con k =", k_final))
+rect.hclust(hc, k = k_final, border = 2:(k_final+1))
+
+```
+```{r}
+perfil <- df_clust %>%
+  group_by(cluster) %>%
+  summarise(
+    n = n(),
+    preciom_med = median(preciom),
+    preciom_p25 = quantile(preciom, 0.25),
+    preciom_p75 = quantile(preciom, 0.75),
+    estrato_med = median(estrato),
+    area_med = median(areaconst),
+    banios_med = median(banios),
+    parq_med = median(parqueaderos),
+    hab_med = median(habitaciones),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(n))
+
+perfil
+
+```
+Se evaluó el número de conglomerados k=2…8 usando el índice Silhouette promedio. El valor máximo se obtuvo en k=2 (0.616), indicando la partición más coherente desde el punto de vista estadístico.
+
+```{r}
+# Solución alternativa para segmentación útil
+k_alt <- 3
+df_clust_k3 <- df_clust %>% mutate(cluster3 = factor(cutree(hc, k = k_alt)))
+
+perfil3 <- df_clust_k3 %>%
+  group_by(cluster3) %>%
+  summarise(
+    n = n(),
+    preciom_med = median(preciom),
+    preciom_p25 = quantile(preciom, 0.25),
+    preciom_p75 = quantile(preciom, 0.75),
+    estrato_med = median(estrato),
+    area_med = median(areaconst),
+    banios_med = median(banios),
+    parq_med = median(parqueaderos),
+    hab_med = median(habitaciones),
+    .groups = "drop"
+  ) %>%
+  arrange(preciom_med)
+
+perfil3
+
+```
+```{r}
+# Obtener coordenadas PCA
+df_pca_coords <- as.data.frame(pca$x[,1:2])
+
+# Agregar cluster k=3
+df_pca_coords$cluster3 <- df_clust_k3$cluster3
+
+ggplot(df_pca_coords, aes(x = PC1, y = PC2, color = cluster3)) +
+  geom_point(alpha = 0.5) +
+  labs(title = "Clusters (k=3) proyectados en plano PCA",
+       x = "PC1",
+       y = "PC2") +
+  theme_minimal()
+
+
+```
+```{r}
+ggplot(df_clust_k3, aes(x = areaconst, y = preciom, color = cluster3)) +
+  geom_point(alpha = 0.6) +
+  labs(title = "Clusters según área y precio",
+       x = "Área construida",
+       y = "Precio por m²") +
+  theme_minimal()
+
+```
+```{r}
+# Quitar outliers extremos (ejemplo percentil 99)
+df_filtrado <- df_clust %>%
+  filter(preciom < quantile(preciom, 0.99))
+
+Xf <- scale(df_filtrado %>% select(all_of(vars_num)))
+hc_f <- hclust(dist(Xf), method = "average")
+
+fviz_nbclust(Xf, FUN = hcut, method = "silhouette")
+
+```
+
+
+
+La solución óptima según el índice Silhouette fue k=2, lo cual separa el mercado en un grupo masivo y un pequeño grupo de inmuebles extremos (outliers premium). Sin embargo, para fines estratégicos de segmentación comercial se evaluó k=3, donde se distinguen tres niveles: mercado general, segmento alto y segmento ultra-premium. Los clusters muestran una clara diferenciación principalmente explicada por precio por m² y área construida.
+
+Lo que se puede ver con el algoritmo de cluster es que el mercado esta dominado homogeneamente y tiene variabilidad continua no hay segmentacion natural fuerte y el algoritmo esta clasificando fronteras por lo tanto el algoritmo identifica bien outliers
+
+```{r}
+tab_ze <- table(df$zona, df$estrato)
+tab_ze
+
 
 ```
 
 ```{r}
-ggplot(vivienda, aes(x = zona, y = preciom)) +
-  geom_boxplot(fill = "lightblue") +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-  labs(title = "Precio por zona")
+chi_ze <- chisq.test(tab_ze)
+chi_ze
+```
+```{r}
+ca_ze <- CA(tab_ze, graph = FALSE)
+
+ca_ze$eig
+```
+```{r}
+fviz_ca_biplot(ca_ze, repel = TRUE) +
+  labs(title = "Análisis de Correspondencia: Zona vs Estrato")
+
+
+
+
+```
+
+
+La prueba chi-cuadrado (χ² = 3839.5, p < 0.001) confirma una asociación altamente significativa entre la zona de la ciudad y el estrato socioeconómico.
+
+El análisis de correspondencia generó tres dimensiones, donde las dos primeras explican el 97.7% de la inercia total (Dim1 = 69.9%, Dim2 = 27.7%), permitiendo una representación bidimensional prácticamente completa.
+
+La Dimensión 1 representa un eje socioeconómico, diferenciando zonas asociadas a estratos bajos (3) de aquellas vinculadas a estratos altos (6).
+
+En particular:
+
+Zona Oeste se asocia fuertemente con estrato 6, caracterizándose como zona premium.
+
+Zona Oriente y Zona Centro se relacionan principalmente con estrato 3, reflejando un perfil socioeconómico más popular.
+
+Zona Norte y Zona Sur presentan asociación con estratos 4 y 5, representando segmentos intermedios del mercado.
+
+Estos resultados evidencian una clara segmentación espacial del mercado inmobiliario según nivel socioeconómico, lo cual es fundamental para estrategias de pricing, inversión y desarrollo inmobiliario.
+
+
+```{r}
+# Top 10 barrios con más registros
+top_barrios <- df %>%
+  count(barrio, sort = TRUE) %>%
+  slice_head(n = 10) %>%
+  pull(barrio)
+
+top_barrios
+
+```
+
+```{r}
+tab_be <- df %>%
+  filter(barrio %in% top_barrios) %>%
+  count(barrio, estrato) %>%
+  pivot_wider(names_from = estrato, values_from = n, values_fill = 0) %>%
+  column_to_rownames("barrio")
+
+tab_be
 
 ```
 ```{r}
-table(vivienda$tipo)
+chisq.test(tab_be)
 
 ```
 
 ```{r}
-ggplot(vivienda, aes(x = tipo, y = preciom)) +
-  geom_boxplot(fill = "salmon") +
-  labs(title = "Precio según tipo de vivienda")
+ca_be <- CA(tab_be, graph = FALSE)
+
+ca_be$eig
 
 ```
+
 ```{r}
-library(DataExplorer)
-create_report(vivienda, output_file = "EDA_vivienda.html")
-
+fviz_ca_biplot(ca_be, repel = TRUE) +
+  labs(title = "Análisis de Correspondencia: Top 10 Barrios vs Estrato")
 
 ```
 
+El test Chi-cuadrado (X² = 3734, p < 0.001) indica que existe una asociación estadísticamente significativa entre barrio y estrato, rechazando la hipótesis de independencia. Esto confirma que la estructura socioeconómica del mercado inmobiliario presenta una clara diferenciación espacial.
+
+La primera dimensión explica el 72.2% de la variabilidad asociativa, capturando el eje principal de segregación socioeconómica. La segunda dimensión (21.9%) complementa esta diferenciación, permitiendo una representación bidimensional adecuada (94% acumulado).
+
+El mapa revela que barrios como Pance, Santa Teresita y Ciudad Jardín se encuentran fuertemente asociados a estratos altos, mientras que barrios como Valle del Lili y El Caney presentan un perfil predominantemente medio. La Flora y El Ingenio muestran una asociación clara con estrato 5.
+
+Estos resultados evidencian que el mercado inmobiliario urbano presenta patrones estructurales de concentración socioeconómica por barrio.
+
+
+El Análisis de Componentes Principales permitió identificar que:
+
+El primer componente (45.7%) representa un eje de valorización inmobiliaria, asociado a precio por m², área construida, número de baños, parqueaderos y estrato.
+
+El segundo componente (18.6%) captura una diferenciación espacial y estructural, relacionada con habitaciones y variables geográficas (latitud y longitud).
+
+En conjunto, los dos primeros componentes explican el 64.3% de la variabilidad del mercado, lo que indica que el comportamiento inmobiliario puede resumirse principalmente en:
+
+Nivel socioeconómico + Localización espacial.
+
+Esto confirma que el precio no depende solo del tamaño, sino de la estructura socioeconómica y la ubicación.
+
+2️⃣ Segmentación del mercado (Clustering)
+
+El análisis de conglomerados mostró que:
+
+El índice de Silhouette sugiere que k=2 es el mejor número de clusters, aunque con separación moderada.
+
+La visualización revela que el mercado está altamente concentrado en un gran grupo homogéneo.
+
+Existe un pequeño subconjunto de propiedades con características extremas (mayor precio, mayor área, mayor estrato).
+
+Interpretación clave:
+
+El mercado inmobiliario urbano no presenta múltiples segmentos claramente separados, sino un núcleo dominante con algunos inmuebles premium que actúan como outliers estructurales.
+
+Esto indica que la diferenciación ocurre más como gradiente continuo que como bloques rígidos.
+
+3️⃣ Asociación espacial socioeconómica (Correspondencia)
+
+El test Chi-cuadrado confirmó una asociación altamente significativa entre zona/barrio y estrato (p < 0.001).
+
+El Análisis de Correspondencia mostró que:
+
+La primera dimensión explica más del 70% de la estructura asociativa.
+
+Existe una clara segregación espacial socioeconómica.
+
+Barrios como Pance y Santa Teresita están fuertemente asociados a estratos altos.
+
+Barrios como Valle del Lili y El Caney presentan perfil medio.
+
+Algunos barrios muestran perfiles mixtos.
+
+Conclusión estructural:
+
+La ciudad presenta una organización espacial claramente diferenciada por nivel socioeconómico.
+
+🔷 Integración global de resultados
+
+Si unimos todo:
+
+Método	Qué mostró
+PCA	Existe eje de valorización y eje espacial
+Clustering	Mercado concentrado con pocos extremos
+Correspondencia	Fuerte segregación socioeconómica espacial
+
+Eso significa que:
+
+✔ El mercado tiene una estructura continua de valorización
+✔ La localización explica gran parte del comportamiento
+✔ No hay muchos “segmentos puros”, sino gradientes
+✔ La estructura socioeconómica está territorialmente definida
+
+🔷 Conclusión estratégica para la inmobiliaria
+
+Desde una perspectiva aplicada:
+
+La valoración debe considerar ubicación y estrato como variables estructurales.
+
+El mercado no requiere segmentación excesiva; bastan grandes categorías.
+
+Existen nichos premium claramente identificables.
+
+La estructura socioeconómica territorial influye directamente en precios.
+
+🔷 Conclusión académica final (para cerrar con elegancia)
+
+El análisis multivariado evidencia que el mercado inmobiliario urbano presenta una estructura organizada principalmente en torno a un eje de valorización socioeconómica y una diferenciación espacial significativa. Aunque el mercado muestra alta concentración en un núcleo dominante, existen perfiles extremos que configuran subsegmentos de alto valor. La fuerte asociación entre barrio y estrato confirma la existencia de patrones estructurales de segregación socioeconómica territorial.
