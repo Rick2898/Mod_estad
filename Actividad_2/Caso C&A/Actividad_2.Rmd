@@ -1,0 +1,363 @@
+---
+title: "Caso C&A"
+author: "Ricardo Vargas Murillo"
+date: "2026-03-03"
+output:
+   html_document:
+     code_folding: hide
+  
+---
+Este es un analisis de compra de viviendas con las siguientes características: 
+
+```{r setup, echo=FALSE}
+knitr::opts_chunk$set(
+   message = FALSE, warning = FALSE,
+  fig.align = "center", fig.width = 9, fig.height = 5
+)
+options(scipen = 999)
+set.seed(123)
+```
+
+```{r librerias,echo = FALSE}
+
+library(devtools)
+library(paqueteMODELOS)   # si falla, instala desde github (ver chunk siguiente)
+library(tidyverse)
+library(janitor)
+library(skimr)
+library(plotly)
+library(leaflet)
+library(broom)
+library(lmtest)
+library(car)
+library(performance)
+library(Metrics)
+library(rsample)
+library(tibble)
+library(kableExtra)
+library(DT)
+```
+
+
+```{r tablas, }
+tabla_viviendas <- tibble(
+  Características = c(
+    "Tipo",
+    "área construida",
+    "parqueaderos",
+    "baños",
+    "habitaciones",
+    "estrato",
+    "zona",
+    "crédito preaprobado"
+  ),
+  `Vivienda 1` = c(
+    "Casa",
+    "200",
+    "1",
+    "2",
+    "4",
+    "4 o 5",
+    "Norte",
+    "350 millones"
+  ),
+  `Vivienda 2` = c(
+    "Apartamento",
+    "300",
+    "3",
+    "3",
+    "5",
+    "5 o 6",
+    "Sur",
+    "850 millones"
+  )
+)
+
+knitr::kable(tabla_viviendas, caption = "Comparación de viviendas")
+```
+
+
+Se responderá la solicitud del cliente mediante las tecnicas de modelacion. Por lo tanto este es un informe donde se analizarán los dos casos de vivienda.
+
+```{r Traer datos,echo = FALSE }
+
+data("vivienda")
+
+df <- vivienda %>%
+  clean_names()
+
+# Asegurar tipos (según tu profesor suele tratar estrato/piso como categóricas)
+df <- df %>%
+  mutate(
+    zona = factor(zona),
+    piso = factor(piso),
+    estrato = factor(estrato),
+    tipo = factor(tipo),
+    banios = as.numeric(banios),
+    habitaciones = as.numeric(habitaciones),
+    parqueaderos = as.numeric(parqueaderos),
+    areaconst = as.numeric(areaconst),
+    preciom = as.numeric(preciom),
+    longitud = as.numeric(longitud),
+    latitud = as.numeric(latitud)
+  )
+
+```
+
+## Vivienda 1
+
+Comenzaremos realizando el analisis de la Vivienda 1 (Casa, 200m2)
+
+
+```{r filtro_vivienda_1, }
+base1 <- df %>%
+  filter(
+    tipo == "Casa",
+    zona %in% c("Norte", "Zona Norte"),
+    areaconst >= 180 & areaconst <= 250,
+    parqueaderos >= 1,
+    banios >= 2,
+    habitaciones >= 4,
+    as.numeric(as.character(estrato)) >= 4
+  )
+
+
+
+
+```
+
+
+
+A continuación se puede ver un filtrado inicial de las posibles viviendas en las que podria haber interes:
+
+```{r tabla_scroll}
+
+
+DT::datatable(
+  base1,
+  caption = "Viviendas posibles etapa inicial",
+  options = list(
+    pageLength = 10,
+    scrollX = TRUE,
+    scrollY = "400px"
+  )
+)
+```
+
+```{r}
+
+leaflet(base1) %>%
+  addTiles() %>%
+  addCircleMarkers(
+    lng = ~longitud,
+    lat = ~latitud,
+    radius = 4,
+    opacity = 0.8,
+    popup = ~paste0(
+      "<b>Barrio:</b> ", barrio,
+      "<br><b>Precio:</b> ", preciom, " M",
+      "<br><b>Área:</b> ", areaconst,
+      "<br><b>Estrato:</b> ", estrato,
+      "<br><b>Habitaciones:</b> ", habitaciones,
+      "<br><b>Baños:</b> ", banios,
+      "<br><b>Parqueaderos:</b> ", parqueaderos,
+      "<br><b>Longitud:</b> ", round(longitud, 5),
+      "<br><b>Latitud:</b> ", round(latitud, 5)
+    )
+  )
+```
+
+
+
+
+
+```{r diagnostico_base1}
+
+b1 <- base1 %>%
+  select(preciom, areaconst, estrato, banios, habitaciones, parqueaderos) %>%
+  drop_na(preciom, areaconst, estrato, banios, habitaciones, parqueaderos) %>%
+  mutate(estrato = as.factor(estrato))
+
+p1 <- plot_ly(
+  data = b1, x = ~areaconst, y = ~preciom, color = ~estrato,
+  type = "scatter", mode = "markers"
+) %>%
+  layout(title = "Base 1: Precio vs Área (coloreado por estrato)",
+         xaxis = list(title = "Área construida"),
+         yaxis = list(title = "Precio (millones)"))
+p1
+```
+
+
+```{r}
+
+p2 <- plot_ly(b1, x = ~estrato, y = ~preciom, type = "box") %>%
+  layout(title = "Base 1: Precio por estrato", xaxis = list(title="Estrato"), yaxis=list(title="Precio"))
+p2
+```
+
+
+```{r mapa_zonas}
+library(dplyr)
+library(leaflet)
+
+# 1) Definir puntos de corte por latitud
+# Ajusta estos valores según tu base y tu ciudad
+lat_sur_centro   <- 4.60
+lat_centro_norte <- 4.70
+
+# 2) Crear variable de zona
+base1 <- base1 %>%
+  mutate(
+    zona = case_when(
+      latitud < lat_sur_centro ~ "Sur",
+      latitud >= lat_sur_centro & latitud < lat_centro_norte ~ "Centro",
+      latitud >= lat_centro_norte ~ "Norte",
+      TRUE ~ NA_character_
+    )
+  )
+
+# 3) Paleta de colores por zona
+pal <- colorFactor(
+  palette = c("Sur" = "red", "Centro" = "orange", "Norte" = "darkgreen"),
+  domain = base1$zona
+)
+
+# 4) Límites del mapa para dibujar las líneas divisorias
+min_lon <- min(base1$longitud, na.rm = TRUE)
+max_lon <- max(base1$longitud, na.rm = TRUE)
+min_lat <- min(base1$latitud, na.rm = TRUE)
+max_lat <- max(base1$latitud, na.rm = TRUE)
+
+# 5) Construcción del mapa
+leaflet(data = base1) %>%
+  addTiles() %>%
+  
+  # Puntos
+  addCircleMarkers(
+    lng = ~longitud,
+    lat = ~latitud,
+    color = ~pal(zona),
+    radius = 3,
+    stroke = FALSE,
+    fillOpacity = 0.45,
+    opacity = 0.7,
+    popup = ~paste0(
+      "<b>Zona:</b> ", zona,
+      "<br><b>Precio:</b> ", preciom, " M",
+      "<br><b>Área:</b> ", areaconst,
+      "<br><b>Estrato:</b> ", estrato,
+      "<br><b>Habitaciones:</b> ", habitaciones,
+      "<br><b>Baños:</b> ", banios,
+      "<br><b>Parqueaderos:</b> ", parqueaderos
+    )
+  ) %>%
+  
+  # Línea divisoria Sur / Centro
+  addPolylines(
+    lng = c(min_lon, max_lon),
+    lat = c(lat_sur_centro, lat_sur_centro),
+    color = "black",
+    weight = 3,
+    opacity = 0.9,
+    popup = "Límite Sur - Centro"
+  ) %>%
+  
+  # Línea divisoria Centro / Norte
+  addPolylines(
+    lng = c(min_lon, max_lon),
+    lat = c(lat_centro_norte, lat_centro_norte),
+    color = "black",
+    weight = 3,
+    opacity = 0.9,
+    popup = "Límite Centro - Norte"
+  ) %>%
+  
+  # Leyenda
+  addLegend(
+    position = "bottomright",
+    pal = pal,
+    values = ~zona,
+    title = "Zona",
+    opacity = 1
+  )
+
+```
+
+
+
+## Vivienda 2
+
+
+
+```{r filtro_vivienda_2}
+
+base2 <- df %>%
+  filter(
+    tipo == "Apartamento",
+    zona %in% c("Sur", "Zona Sur"),
+    areaconst >= 300,
+    parqueaderos >= 3,
+    banios >= 3,
+    habitaciones >= 5,
+    as.numeric(as.character(estrato)) >= 5
+  )
+
+nrow(base2)
+
+DT::datatable(
+  base2,
+  caption = "Apartamentos que cumplen o superan los criterios de la Vivienda 2",
+  options = list(
+    pageLength = 10,
+    scrollX = TRUE,
+    scrollY = "400px"
+  )
+)
+
+```
+
+
+```{r}
+
+leaflet(base2) %>%
+  addTiles() %>%
+  addCircleMarkers(
+    lng = ~longitud,
+    lat = ~latitud,
+    radius = 4,
+    opacity = 0.8,
+    popup = ~paste0(
+      "<b>Barrio:</b> ", barrio,
+      "<br><b>Precio:</b> ", preciom, " M",
+      "<br><b>Área:</b> ", areaconst,
+      "<br><b>Estrato:</b> ", estrato,
+      "<br><b>Habitaciones:</b> ", habitaciones,
+      "<br><b>Baños:</b> ", banios,
+      "<br><b>Parqueaderos:</b> ", parqueaderos,
+      "<br><b>Longitud:</b> ", round(longitud, 5),
+      "<br><b>Latitud:</b> ", round(latitud, 5)
+    )
+  )
+
+```
+
+
+
+```{r}
+base3 <- df %>%
+  filter(tipo == "Apartamento", zona == "Zona Sur")
+```
+
+```{r}
+leaflet(base3) %>%
+  addTiles() %>%
+  addCircleMarkers(
+    lng = ~longitud, lat = ~latitud,
+    radius = 4, opacity = 0.8,
+    popup = ~paste0("Precio: ", preciom, " M | Area: ", areaconst,
+                    " | Estrato: ", estrato, " | Hab: ", habitaciones,
+                    " | Baños: ", banios, " | Parq: ", parqueaderos)
+  )
+```
+

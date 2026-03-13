@@ -1,0 +1,633 @@
+---
+title: "Caso C&A"
+author: "Ricardo Vargas Murillo"
+date: "2026-03-03"
+output:
+   html_document:
+     code_folding: hide
+  
+---
+Este es un analisis de compra de viviendas con las siguientes características: 
+
+```{r setup, echo=FALSE}
+knitr::opts_chunk$set(
+   message = FALSE, warning = FALSE,
+  fig.align = "center", fig.width = 9, fig.height = 5
+)
+options(scipen = 999)
+set.seed(123)
+```
+
+```{r librerias,echo = FALSE}
+
+library(devtools)
+library(paqueteMODELOS)   # si falla, instala desde github (ver chunk siguiente)
+library(tidyverse)
+library(janitor)
+library(skimr)
+library(plotly)
+library(leaflet)
+library(broom)
+library(lmtest)
+library(car)
+library(performance)
+library(Metrics)
+library(rsample)
+library(tibble)
+library(kableExtra)
+library(DT)
+```
+
+
+```{r tablas, }
+tabla_viviendas <- tibble(
+  Características = c(
+    "Tipo",
+    "área construida",
+    "parqueaderos",
+    "baños",
+    "habitaciones",
+    "estrato",
+    "zona",
+    "crédito preaprobado"
+  ),
+  `Vivienda 1` = c(
+    "Casa",
+    "200",
+    "1",
+    "2",
+    "4",
+    "4 o 5",
+    "Norte",
+    "350 millones"
+  ),
+  `Vivienda 2` = c(
+    "Apartamento",
+    "300",
+    "3",
+    "3",
+    "5",
+    "5 o 6",
+    "Sur",
+    "850 millones"
+  )
+)
+
+knitr::kable(tabla_viviendas, caption = "Comparación de viviendas")
+```
+
+
+Se responderá la solicitud del cliente mediante las tecnicas de modelacion. Por lo tanto este es un informe donde se analizarán los dos casos de vivienda.
+
+```{r Traer datos,echo = FALSE }
+
+data("vivienda")
+
+df <- vivienda %>%
+  clean_names()
+
+# Asegurar tipos (según tu profesor suele tratar estrato/piso como categóricas)
+df <- df %>%
+  mutate(
+    zona = factor(zona),
+    piso = factor(piso),
+    estrato = factor(estrato),
+    tipo = factor(tipo),
+    banios = as.numeric(banios),
+    habitaciones = as.numeric(habitaciones),
+    parqueaderos = as.numeric(parqueaderos),
+    areaconst = as.numeric(areaconst),
+    preciom = as.numeric(preciom),
+    longitud = as.numeric(longitud),
+    latitud = as.numeric(latitud)
+  )
+
+```
+
+```{r funciones_tablas, echo=FALSE}
+tabla_bonita <- function(x, titulo = NULL) {
+  knitr::kable(
+    x,
+    caption = titulo,
+    format = "html"
+  ) |>
+    kableExtra::kable_styling(
+      full_width = FALSE,
+      bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+      position = "left"
+    )
+}
+```
+
+
+
+## Vivienda 1
+
+Comenzaremos realizando el analisis de la Vivienda 1 (Casa, 200m2)
+
+
+```{r filtro_vivienda_1, }
+
+base1 <- df %>%
+  filter(tipo == "Casa", zona == "Zona Norte")
+
+tabla_bonita(
+  head(base1, 3),
+  "Primeras 3 observaciones de viviendas tipo casa en Zona Norte"
+)
+
+```
+
+
+La base de datos se filtro para obtener viviendas tipo casa ubicadas en la zona norte de la Cali, las tablas que se muestran a continuacion permiten verificar que el filtro fue aplicado y corresponden a lo requerido
+
+
+```{r}
+
+# Tablas que comprueban la consulta
+tabla_bonita(
+  base1 %>% count(tipo),
+  "Distribución por tipo"
+)
+
+tabla_bonita(
+  base1 %>% count(zona),
+  "Distribución por zona"
+)
+
+tabla_bonita(
+  base1 %>% count(estrato) %>% arrange(desc(n)),
+  "Distribución por estrato"
+)
+
+```
+
+
+```{r}
+leaflet(base1) %>%
+  addTiles() %>%
+  addCircleMarkers(
+    lng = ~longitud, lat = ~latitud,
+    radius = 4, opacity = 0.8,
+    popup = ~paste0("Precio: ", preciom, " M | Area: ", areaconst,
+                    " | Estrato: ", estrato, " | Hab: ", habitaciones,
+                    " | Baños: ", banios, " | Parq: ", parqueaderos)
+  )
+```
+
+El mapa permite verificar la distribución geografica de las viviendas en donde se observa concentración en la zona norte de la ciudad y hay algunos puntos alejados dentro del filtro inicial
+
+```{r}
+b1 <- base1 %>%
+  select(preciom, areaconst, estrato, banios, habitaciones, parqueaderos) %>%
+  drop_na(preciom, areaconst, estrato, banios, habitaciones, parqueaderos) %>%
+  mutate(estrato = as.factor(estrato))
+
+p1 <- plot_ly(
+  data = b1, x = ~areaconst, y = ~preciom, color = ~estrato,
+  type = "scatter", mode = "markers"
+) %>%
+  layout(title = "Vivienda 1: Precio vs Área (coloreado por estrato)",
+         xaxis = list(title = "Área construida"),
+         yaxis = list(title = "Precio (millones)"))
+p1
+```
+
+El gráfico de dispersion nos muestra la relacion area vs precio directamente podemos ver una tendencia positiva que indica a mayor area aumenta el precio ademas el estrato tambien hace que las viviendas aumenten de precio.
+
+```{r}
+p2 <- plot_ly(b1, x = ~estrato, y = ~preciom, type = "box") %>%
+  layout(title = "Vivienda 1: Precio por estrato", xaxis = list(title="Estrato"), yaxis=list(title="Precio"))
+p2
+```
+
+El box-plot nos permite analizar la distribución de precio segun el estrato en donde los estratos mas altos presentan precios un poco mas altos y consiste con lo natural del mercado inmobiliario
+
+```{r}
+set.seed(123)
+split1 <- initial_split(b1, prop = 0.70)
+train1 <- training(split1)
+test1  <- testing(split1)
+```
+
+```{r}
+m1 <- lm(preciom ~ areaconst + estrato + habitaciones + parqueaderos + banios, data = train1)
+
+# 1. Tabla de coeficientes
+tabla_coeficientes <- broom::tidy(m1) %>%
+  mutate(across(where(is.numeric), ~round(., 4))) %>%
+  rename(
+    Término = term,
+    Estimación = estimate,
+    `Error estándar` = std.error,
+    `Estadístico t` = statistic,
+    `Valor p` = p.value
+  )
+
+tabla_bonita(
+  tabla_coeficientes,
+  "Tabla 1. Coeficientes estimados del modelo de regresión lineal"
+)
+
+# 2. Tabla de métricas globales del modelo
+tabla_metricas <- broom::glance(m1) %>%
+  transmute(
+    `R²` = round(r.squared, 4),
+    `R² ajustado` = round(adj.r.squared, 4),
+    `Error estándar residual` = round(sigma, 4),
+    `Estadístico F` = round(statistic, 4),
+    `Valor p del modelo` = signif(p.value, 4),
+    AIC = round(AIC, 4),
+    BIC = round(BIC, 4),
+    `Número de observaciones` = nobs
+  )
+
+tabla_bonita(
+  tabla_metricas,
+  "Tabla 2. Métricas globales del modelo"
+)
+
+# 3. Tabla resumen de residuales
+tabla_residuales <- tibble(
+  `Mínimo` = min(residuals(m1)),
+  `Q1` = quantile(residuals(m1), 0.25),
+  `Mediana` = median(residuals(m1)),
+  `Media` = mean(residuals(m1)),
+  `Q3` = quantile(residuals(m1), 0.75),
+  `Máximo` = max(residuals(m1))
+) %>%
+  mutate(across(where(is.numeric), ~round(., 4)))
+
+tabla_bonita(
+  tabla_residuales,
+  "Tabla 3. Resumen de residuales del modelo"
+)
+```
+El modelo presenta un 𝑅2 de 0.6236, lo que indica que explica aproximadamente el 62.36% de la variabilidad del precio. El área construida, los estratos 5 y 6, el número de parqueaderos y el número de baños presentan efectos positivos y estadísticamente significativos sobre el precio del inmueble.
+
+Realizamos un modelo de regresión lineal multiple para explicar el precio en funcion de: area, estrato, habitaciones, parqueaderos y baños. 
+
+El coeficiente areaconst indica el cambio esperado en el precio por cada m2
+
+```{r graficos_diagnosticos, results='hide' }
+# Gráficos diagnósticos clásicos
+par(mfrow=c(2,2))
+plot(m1)
+par(mfrow=c(1,1))
+
+# Pruebas
+shapiro.test(residuals(m1))     # normalidad (ojo: con n grande casi siempre rechaza)
+bptest(m1)                      # heterocedasticidad
+dwtest(m1)                      # autocorrelación (en datos no temporales puede no ser clave)
+car::vif(m1)                    # multicolinealidad
+```
+
+El gráfico Q-Q permite evaluar la normalidad de los residuos.
+Aunque la prueba de Shapiro-Wilk puede rechazar la normalidad en muestras grandes, el análisis visual sugiere que los residuos se distribuyen aproximadamente de forma normal.
+
+
+La prueba de Breusch-Pagan evalúa si la varianza de los residuos es constante.
+En caso de no rechazar la hipótesis nula, se concluye que no hay evidencia de heterocedasticidad.
+
+El factor de inflación de varianza (VIF) se utilizó para evaluar multicolinealidad entre las variables explicativas.
+Valores de VIF inferiores a 5 sugieren que no existe un problema grave de colinealidad.
+
+```{r}
+pred1 <- predict(m1, newdata = test1)
+
+rmse1 <- rmse(test1$preciom, pred1)
+mae1  <- mae(test1$preciom, pred1)
+r2_1  <- cor(test1$preciom, pred1)^2
+
+tabla_metricas_test <- tibble(
+  RMSE = round(rmse1, 4),
+  MAE = round(mae1, 4),
+  `R² en test` = round(r2_1, 4)
+)
+
+tabla_bonita(
+  tabla_metricas_test,
+  "Tabla 4. Métricas de desempeño del modelo en el conjunto de prueba"
+)
+```
+
+
+```{r}
+sol1_e4 <- tibble(
+  areaconst = 200,
+  estrato = factor("4", levels = levels(train1$estrato)),
+  habitaciones = 4,
+  parqueaderos = 1,
+  banios = 2
+)
+
+sol1_e5 <- tibble(
+  areaconst = 200,
+  estrato = factor("5", levels = levels(train1$estrato)),
+  habitaciones = 4,
+  parqueaderos = 1,
+  banios = 2
+)
+
+p_sol1_e4 <- predict(m1, sol1_e4)
+p_sol1_e5 <- predict(m1, sol1_e5)
+
+tabla_pred <- tibble(
+  Escenario = c("Vivienda tipo en Estrato 4", "Vivienda tipo en Estrato 5"),
+  `Precio estimado (millones)` = round(c(p_sol1_e4, p_sol1_e5), 2)
+)
+
+tabla_bonita(
+  tabla_pred,
+  "Tabla. Predicción del precio para una vivienda de 200 m² con 4 habitaciones, 1 parqueadero y 2 baños"
+)
+```
+
+```{r}
+# Filtrado flexible  "200")
+ofertas1 <- base1 %>%
+  drop_na(preciom, areaconst, parqueaderos, banios, habitaciones, longitud, latitud) %>%
+  filter(preciom <= 350) %>%
+  filter(areaconst >= 180, areaconst <= 220) %>%
+  filter(parqueaderos >= 1, banios >= 2, habitaciones >= 4) %>%
+  arrange(preciom) %>%
+  slice_head(n = 5)
+
+tabla_ofertas1 <- ofertas1 %>%
+  select(
+    Precio = preciom,
+    `Área construida` = areaconst,
+    Estrato = estrato,
+    Parqueaderos = parqueaderos,
+    Baños = banios,
+    Habitaciones = habitaciones,
+    Barrio = barrio
+  )
+
+tabla_bonita(
+  tabla_ofertas1,
+  "Tabla 6. Mejores ofertas filtradas para la Vivienda 1"
+)
+```
+
+Los resultados muestran que dentro del rango presupuestal considerado (≤ 350 millones), la mayoría de las propiedades disponibles con características similares corresponden a estrato 3. Esto sugiere que las viviendas de estrato 4 o superior con estas características tienden a ubicarse en rangos de precio más elevados.
+
+
+```{r}
+leaflet(ofertas1) %>%
+  addTiles() %>%
+  addCircleMarkers(
+    lng = ~longitud, lat = ~latitud,
+    radius = 6,
+    popup = ~paste0("Precio: ", preciom, " M | Barrio: ", barrio,
+                    " | Area: ", areaconst, " | Estrato: ", estrato,
+                    " | Hab: ", habitaciones, " | Baños: ", banios,
+                    " | Parq: ", parqueaderos)
+  )
+```
+
+En este caso lo mejor es que habria que validar el precio final, verificar si el cliente se ajusta le gusta realizando una visita presencial a cada apartamento que se ajuste.
+
+## Vivienda 2
+
+Comenzaremos realizando las primeras observaciones del data set
+```{r}
+base2 <- df %>%
+  filter(tipo == "Apartamento", zona == "Zona Sur")
+
+tabla_bonita(
+  head(base2, 3),
+  "Tabla 7. Primeras 3 observaciones de apartamentos en Zona Sur"
+)
+```
+
+
+
+```{r}
+
+leaflet(base2) %>%
+  addTiles() %>%
+  addCircleMarkers(
+    lng = ~longitud,
+    lat = ~latitud,
+    radius = 4,
+    opacity = 0.8,
+    popup = ~paste0(
+      "<b>Barrio:</b> ", barrio,
+      "<br><b>Precio:</b> ", preciom, " M",
+      "<br><b>Área:</b> ", areaconst,
+      "<br><b>Estrato:</b> ", estrato,
+      "<br><b>Habitaciones:</b> ", habitaciones,
+      "<br><b>Baños:</b> ", banios,
+      "<br><b>Parqueaderos:</b> ", parqueaderos,
+      "<br><b>Longitud:</b> ", round(longitud, 5),
+      "<br><b>Latitud:</b> ", round(latitud, 5)
+    )
+  )
+```
+
+
+```{r}
+b2 <- base2 %>%
+  select(preciom, areaconst, estrato, banios, habitaciones, parqueaderos) %>%
+  drop_na(preciom, areaconst, estrato, banios, habitaciones, parqueaderos) %>%
+  mutate(estrato = as.factor(estrato))
+
+p3 <- plot_ly(
+  data = b2, x = ~areaconst, y = ~preciom, color = ~estrato,
+  type = "scatter", mode = "markers"
+) %>%
+  layout(title = "Base 2: Precio vs Área (coloreado por estrato)",
+         xaxis = list(title = "Área construida"),
+         yaxis = list(title = "Precio (millones)"))
+p3
+```
+Podemos ver que se parece mucho a la anterior grafica en donde tambien se puede ver una relacion positiva con el grafico de dispersion, por lo tanto realizaremos la estimación igual que con la anterior
+
+```{r}
+set.seed(123)
+split2 <- initial_split(b2, prop = 0.70)
+train2 <- training(split2)
+test2  <- testing(split2)
+```
+
+
+```{r}
+
+m2 <- lm(preciom ~ areaconst + estrato + habitaciones + parqueaderos + banios, data = train2)
+
+```
+
+```{r}
+tabla_coeficientes_m2 <- broom::tidy(m2) %>%
+  mutate(across(where(is.numeric), ~round(., 4))) %>%
+  rename(
+    Término = term,
+    Estimación = estimate,
+    `Error estándar` = std.error,
+    `Estadístico t` = statistic,
+    `Valor p` = p.value
+  )
+
+tabla_bonita(
+  tabla_coeficientes_m2,
+  "Tabla 14. Coeficientes estimados del modelo de regresión lineal para la Vivienda 2"
+)
+```
+```{r}
+
+tabla_coeficientes_m2 <- broom::tidy(m2) %>%
+  mutate(across(where(is.numeric), ~round(., 4))) %>%
+  rename(
+    Término = term,
+    Estimación = estimate,
+    `Error estándar` = std.error,
+    `Estadístico t` = statistic,
+    `Valor p` = p.value
+  )
+
+tabla_bonita(
+  tabla_coeficientes_m2,
+  "Tabla 14. Coeficientes estimados del modelo de regresión lineal para la Vivienda 2"
+)
+```
+
+
+
+En el modelo estimado para la Vivienda 2, el área construida, el estrato, el número de parqueaderos y el número de baños presentan una relación positiva con el precio del inmueble. Esto significa que, manteniendo constantes las demás variables, un mayor valor en estas características se asocia con precios más altos. En contraste, el coeficiente de habitaciones aparece negativo, lo que puede deberse a la relación entre esta variable y otras características del inmueble, como el área construida o la distribución interna de la propiedad.
+
+
+
+
+```{r , results='hide'}
+
+par(mfrow=c(2,2))
+plot(m2)
+par(mfrow=c(1,1))
+
+shapiro.test(residuals(m2))
+bptest(m2)
+dwtest(m2)
+car::vif(m2)
+```
+
+
+```{r}
+
+pred2 <- predict(m2, newdata = test2)
+
+rmse2 <- rmse(test2$preciom, pred2)
+mae2  <- mae(test2$preciom, pred2)
+r2_2  <- cor(test2$preciom, pred2)^2
+
+tabla_metricas_m2 <- tibble(
+  Métrica = c("RMSE", "MAE", "R² en datos de prueba"),
+  Valor = round(c(rmse2, mae2, r2_2), 4)
+)
+
+tabla_bonita(
+  tabla_metricas_m2,
+  "Tabla. Desempeño predictivo del modelo para la Vivienda 2"
+)
+```
+
+
+El modelo presenta un R² de aproximadamente r round(r2_2,2) en el conjunto de prueba, lo que indica que cerca del r round(r2_2*100,1)% de la variabilidad del precio de los apartamentos es explicada por las variables incluidas en el modelo.
+
+El RMSE muestra el error típico de predicción en millones de pesos, mientras que el MAE representa el error absoluto promedio del modelo. En conjunto, estos indicadores sugieren que el modelo tiene una capacidad predictiva moderada para estimar el precio de apartamentos con características similares.
+
+```{r}
+
+sol2_e5 <- tibble(
+  areaconst = 300,
+  estrato = factor("5", levels = levels(train2$estrato)),
+  habitaciones = 5,
+  parqueaderos = 3,
+  banios = 3
+)
+
+sol2_e6 <- tibble(
+  areaconst = 300,
+  estrato = factor("6", levels = levels(train2$estrato)),
+  habitaciones = 5,
+  parqueaderos = 3,
+  banios = 3
+)
+
+p_sol2_e5 <- predict(m2, sol2_e5)
+p_sol2_e6 <- predict(m2, sol2_e6)
+
+tabla_pred_m2 <- tibble(
+  Escenario = c("Apartamento estrato 5", "Apartamento estrato 6"),
+  `Precio estimado (millones)` = round(c(p_sol2_e5, p_sol2_e6), 1)
+)
+
+tabla_bonita(
+  tabla_pred_m2,
+  "Tabla. Precio estimado para apartamentos con características del cliente"
+)
+```
+
+
+```{r}
+
+ofertas2 <- base2 %>%
+  drop_na(preciom, areaconst, parqueaderos, banios, habitaciones, longitud, latitud) %>%
+  filter(areaconst >= 300) %>%
+  filter(parqueaderos >= 3, banios >= 3, habitaciones >= 5) %>%
+  arrange(preciom) %>%
+  slice_head(n = 5)
+
+tabla_ofertas2 <- ofertas2 %>%
+  select(
+    Precio = preciom,
+    `Área construida` = areaconst,
+    Estrato = estrato,
+    Parqueaderos = parqueaderos,
+    Baños = banios,
+    Habitaciones = habitaciones,
+    Barrio = barrio
+  )
+
+tabla_bonita(
+  tabla_ofertas2,
+  "Tabla. Mejores ofertas encontradas para la Vivienda 2"
+)
+```
+
+```{r}
+leaflet(ofertas2) %>%
+  addTiles() %>%
+  addCircleMarkers(
+    lng = ~longitud, lat = ~latitud,
+    radius = 6,
+    popup = ~paste0("Precio: ", preciom, " M | Barrio: ", barrio,
+                    " | Area: ", areaconst, " | Estrato: ", estrato,
+                    " | Hab: ", habitaciones, " | Baños: ", banios,
+                    " | Parq: ", parqueaderos)
+  )
+```
+
+
+La tabla presenta las mejores ofertas encontradas en el mercado que cumplen con las características solicitadas por el cliente.
+
+Estas propiedades se ubican dentro del rango de precio considerado y presentan áreas construidas cercanas a los 300 m², además de contar con al menos tres parqueaderos, tres baños y cinco habitaciones.
+
+Estas alternativas representan opciones potenciales para el cliente realice la visita presencial y tome una decision sobre el inmueble preferido
+
+
+
+
+
+# Conclusiones
+
+El análisis realizado permitió estimar modelos de regresión para evaluar el precio de viviendas con características específicas solicitadas por el cliente.
+
+En el caso de las casas ubicadas en la zona norte, el modelo mostró que variables como el área construida, el estrato y el número de parqueaderos tienen un impacto importante en el precio del inmueble.
+
+Para los apartamentos ubicados en la zona sur, el modelo indica que el área construida, el estrato y la disponibilidad de parqueaderos también influyen significativamente en el valor del inmueble.
+
+A partir de los modelos estimados y del análisis de las ofertas disponibles en el mercado, se identificaron varias alternativas que cumplen con las características solicitadas por el cliente y que se encuentran dentro del presupuesto disponible.
+
+Estos resultados permiten orientar la toma de decisiones del comprador, proporcionando una estimación objetiva del valor de las propiedades según sus características principales. 
+Hay que tener en cuenta que los datos del mapa en principio estaban atomizados por todo cali y no exactamente filtrados por zonas en donde era muy dificil verificar el precio con un filtrado inicial y esta regresión nos permitio identificarlos con precision.
